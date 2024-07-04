@@ -13,6 +13,7 @@ import com.yupi.springbootinit.constant.CommonConstant;
 import com.yupi.springbootinit.constant.UserConstant;
 import com.yupi.springbootinit.exception.BusinessException;
 import com.yupi.springbootinit.exception.ThrowUtils;
+import com.yupi.springbootinit.manager.RedisLimiterManager;
 import com.yupi.springbootinit.manager.XunFeiAIManager;
 import com.yupi.springbootinit.model.dto.chart.*;
 
@@ -58,6 +59,9 @@ public class ChartController {
 
     @Resource
     private XunFeiAIManager xunFeiAIManager;
+
+    @Resource
+    private RedisLimiterManager redisLimiterManager;
 
     // region 增删改查
 
@@ -307,6 +311,12 @@ public class ChartController {
         String suffix = FileUtil.getSuffix(originalFileName);
         ThrowUtils.throwIf(!VALID_FILE_SUFFIX_LIST.contains(suffix), ErrorCode.PARAMS_ERROR, "文件后缀非法");
 
+        /**
+         * 限流
+         */
+        User currentUser = userService.getLoginUser(request);
+        //针对每个用户的某个具体方法进行限流
+        redisLimiterManager.doRateLimit("genChartByAi_" + currentUser.getId());
 
         //2.拿到csv格式数据
         String csvData = ExcelUtils.excelToCsv(multipartFile);
