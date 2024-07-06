@@ -1,6 +1,6 @@
 package com.yupi.springbootinit.constant;
 
-import org.checkerframework.checker.units.qual.A;
+
 
 import java.util.Arrays;
 import java.util.List;
@@ -26,7 +26,7 @@ public interface FileConstant {
     /**
      * 定义合法的文件后缀列表
      */
-    List<String> VALID_FILE_SUFFIX_LIST = Arrays.asList("png", "xlsx", "xls", "jpg", "svg", "webp", "jpeg");
+    List<String> VALID_FILE_SUFFIX_LIST = Arrays.asList("xlsx", "xls");
 
 
 }

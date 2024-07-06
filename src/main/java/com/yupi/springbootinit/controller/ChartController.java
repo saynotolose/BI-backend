@@ -9,6 +9,7 @@ import com.yupi.springbootinit.common.BaseResponse;
 import com.yupi.springbootinit.common.DeleteRequest;
 import com.yupi.springbootinit.common.ErrorCode;
 import com.yupi.springbootinit.common.ResultUtils;
+import com.yupi.springbootinit.constant.ChartStatus;
 import com.yupi.springbootinit.constant.CommonConstant;
 import com.yupi.springbootinit.constant.UserConstant;
 import com.yupi.springbootinit.exception.BusinessException;
@@ -27,16 +28,18 @@ import com.yupi.springbootinit.service.UserService;
 import com.yupi.springbootinit.utils.ExcelUtils;
 import com.yupi.springbootinit.utils.SqlUtils;
 import lombok.extern.slf4j.Slf4j;
-import net.bytebuddy.implementation.bytecode.Throw;
 import org.apache.commons.lang3.ObjectUtils;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.poi.ss.formula.functions.T;
+import org.checkerframework.checker.units.qual.C;
 import org.springframework.beans.BeanUtils;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import javax.annotation.Resource;
 import javax.servlet.http.HttpServletRequest;
+
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ThreadPoolExecutor;
 
 import static com.yupi.springbootinit.constant.FileConstant.ONE_MB;
 import static com.yupi.springbootinit.constant.FileConstant.VALID_FILE_SUFFIX_LIST;
@@ -62,6 +65,9 @@ public class ChartController {
 
     @Resource
     private RedisLimiterManager redisLimiterManager;
+
+    @Resource
+    private ThreadPoolExecutor threadPoolExecutor;
 
     // region 增删改查
 
@@ -282,7 +288,128 @@ public class ChartController {
 
 
     /**
-     * 智能分析
+     * 智能分析（异步生成）
+     *
+     * @param multipartFile
+     * @param genChartByAiRequest
+     * @param request
+     * @return
+     */
+    @PostMapping("/gen/async")
+    public BaseResponse<BiResponse> genChartByAiAsync(@RequestPart("file") MultipartFile multipartFile,
+                                                 GenChartByAiRequest genChartByAiRequest, HttpServletRequest request) {
+        //插件生成get代码
+        String name = genChartByAiRequest.getName();
+        String goal = genChartByAiRequest.getGoal();
+        String chartType = genChartByAiRequest.getChartType();
+
+        //参数校验
+        //分析目标不应为空
+        ThrowUtils.throwIf(StringUtils.isBlank(goal), ErrorCode.PARAMS_ERROR, "目标为空");
+        //名称不为空且长度大于100，抛异常
+        ThrowUtils.throwIf(StringUtils.isNotBlank(name) && name.length() > 100, ErrorCode.PARAMS_ERROR, "名称过长");
+        //文件校验，大小和后缀
+        //校验大小
+        long size = multipartFile.getSize();
+        ThrowUtils.throwIf(size > ONE_MB, ErrorCode.PARAMS_ERROR, "文件大小超过1MB");
+        //校验文件后缀
+        String fileName_Original = multipartFile.getOriginalFilename();
+        String suffix = FileUtil.getSuffix(fileName_Original);
+        ThrowUtils.throwIf(!VALID_FILE_SUFFIX_LIST.contains(suffix), ErrorCode.PARAMS_ERROR, "文件后缀非法");
+
+        /**
+         * 限流
+         */
+        User currentUser = userService.getLoginUser(request);
+        //针对每个用户的某个具体方法进行限流
+        redisLimiterManager.doRateLimit("genChartByAi_" + currentUser.getId());
+
+        //拿到csv格式数据
+        String csvData = ExcelUtils.excelToCsv(multipartFile);
+
+        //构造用户输入 userInput
+        //头部
+        StringBuilder userInput = new StringBuilder();
+        userInput.append("分析需求").append("\n");
+        //拼接分析目标
+        String origin_goal = goal;
+        if (StringUtils.isNotBlank(chartType)){
+            goal = goal + "，请使用" + chartType;
+        }
+        userInput.append(goal).append("\n");
+        //拼接压缩后数据
+        userInput.append(csvData).append("\n");
+
+        //先把图表保存到数据库，genChart和genResult先不设置
+        Chart chart = new Chart();
+        //插件生成全部set属性
+        chart.setName(name);
+        chart.setGoal(origin_goal);
+        chart.setChartData(csvData);
+        chart.setChartType(chartType);
+        //设置任务状态为等待中
+        chart.setStatus(ChartStatus.WAIT);
+        chart.setUserId(userService.getLoginUser(request).getId());
+        boolean saveRes = chartService.save(chart);
+        ThrowUtils.throwIf(!saveRes, ErrorCode.SYSTEM_ERROR, "图表保存失败");
+
+
+        //在最终的返回结果前提交一个任务
+        //todo 建议处理一下任务队列满了后，抛异常的情况（因为提交任务保存，前端会返回异常）
+        CompletableFuture.runAsync(() ->{
+
+            //先修改图表状态为执行中
+            Chart updateChart = new Chart();
+            updateChart.setId(chart.getId());
+            updateChart.setStatus(ChartStatus.RUNNING);
+            //更新失败情况（数据库可能出问题了）
+            if (!chartService.updateById(updateChart)){
+                handleChartUpdateError(chart.getId(), "更新图表状态为执行中，操作失败");
+                return;
+            }
+
+            //调用ai处理,返回结果
+            String aiRes = xunFeiAIManager.sendMesToAI(userInput.toString());
+            String[] splitsRes = aiRes.split("￥￥￥￥￥");
+            ThrowUtils.throwIf(splitsRes.length < 3, ErrorCode.SYSTEM_ERROR, "AI生成错误");
+            String genChart = splitsRes[1].trim();
+            String genResult = splitsRes[2].trim();
+
+            //ai生成成功后，更新图表内容，更新任务状态为成功
+            Chart updateSuccessChart = new Chart();
+            updateSuccessChart.setId(chart.getId());
+            updateSuccessChart.setGenChart(genChart);
+            updateSuccessChart.setGenResult(genResult);
+            updateSuccessChart.setStatus(ChartStatus.SUCCEED);
+            if ( !chartService.updateById(updateSuccessChart)) {
+                handleChartUpdateError(chart.getId(),"更新图表状态为生成成功，操作失败");
+                return;
+            }
+
+        }, threadPoolExecutor);
+
+        //返回结果
+        BiResponse biResponse = new BiResponse();
+        //biResponse.setGenChart(genChart);
+        //biResponse.setGenResult(genResult);
+        //chart表的id插入后雪花算法自动生成
+        biResponse.setChartId(chart.getId());
+        return ResultUtils.success(biResponse);
+    }
+
+    private void handleChartUpdateError(long chartId, String execMessage){
+        Chart updateResChart = new Chart();
+        updateResChart.setId(chartId);
+        updateResChart.setStatus(ChartStatus.FAILED);
+        updateResChart.setExecMessage(execMessage);
+        if ( !chartService.updateById(updateResChart)){
+           log.error("更新图表状态为失败，操作失败" + chartId + "," + execMessage);
+        }
+    }
+
+
+    /**
+     * 智能分析（同步生成，还是之前的那个接口）
      *
      * @param multipartFile
      * @param genChartByAiRequest
@@ -307,8 +434,8 @@ public class ChartController {
         long size = multipartFile.getSize();
         ThrowUtils.throwIf(size > ONE_MB, ErrorCode.PARAMS_ERROR, "文件大小超过1MB");
         //校验文件后缀
-        String originalFileName = multipartFile.getName();
-        String suffix = FileUtil.getSuffix(originalFileName);
+        String fileName_Original = multipartFile.getOriginalFilename();
+        String suffix = FileUtil.getSuffix(fileName_Original);
         ThrowUtils.throwIf(!VALID_FILE_SUFFIX_LIST.contains(suffix), ErrorCode.PARAMS_ERROR, "文件后缀非法");
 
         /**

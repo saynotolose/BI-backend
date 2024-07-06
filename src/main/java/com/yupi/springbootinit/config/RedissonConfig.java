@@ -9,6 +9,9 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+/**
+ * redisson 限流器配置类
+ */
 @Data
 @Configuration
 @ConfigurationProperties(prefix = "spring.redis")
