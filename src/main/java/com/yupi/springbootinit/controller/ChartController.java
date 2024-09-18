@@ -409,6 +409,22 @@ public class ChartController {
 
 
     /**
+     * 智能分析（异步消息队列）
+     *
+     * @param multipartFile
+     * @param genChartByAiRequest
+     * @param request
+     * @return
+     */
+    @PostMapping("/gen/async/mq")
+    public BaseResponse<BiResponse> genChartByAiAsyncMQ(@RequestPart("file") MultipartFile multipartFile,
+                                                      GenChartByAiRequest genChartByAiRequest, HttpServletRequest request) {
+
+        BiResponse biResponse = chartService.geChartByAiAsyncMQ(multipartFile, genChartByAiRequest, request);
+        return ResultUtils.success(biResponse);
+    }
+
+    /**
      * 智能分析（同步生成，还是之前的那个接口）
      *
      * @param multipartFile
